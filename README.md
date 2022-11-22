@@ -1,6 +1,6 @@
 # SwinVRNN: A Data-Driven Ensemble Forecasting Model via Learned Distribution Perturbation
 
-![Fig-swinvrnn.png](https://code.alibaba-inc.com/fanjiang.cl/wwprediction/blob/master/Fig-swinvrnn.png)
+![Fig-swinvrnn.png](Fig-swinvrnn.png)
 
 ## Introduction
 
