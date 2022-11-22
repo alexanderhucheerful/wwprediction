@@ -1,8 +1,8 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
 import copy
+import math
 import itertools
 import logging
-from collections import defaultdict
-
 from enum import Enum
 from typing import (Any, Callable, Dict, Iterable, List, Optional, Set, Type,
                     Union)
@@ -10,12 +10,8 @@ from typing import (Any, Callable, Dict, Iterable, List, Optional, Set, Type,
 import torch
 from fanjiang.config import CfgNode
 
-from .scheduler import (CosineParamScheduler, CyclicScheduler, LRMultiplier,
+from .scheduler import (CosineParamScheduler, LRMultiplier,
                         MultiStepParamScheduler, WarmupParamScheduler)
-
-
-__all__ = ["build_lr_scheduler", "build_optimizer", "get_default_optimizer_params", "gradient_clipping"]
-
 
 _GradientClipperInput = Union[torch.Tensor, Iterable[torch.Tensor]]
 _GradientClipper = Callable[[_GradientClipperInput], None]
@@ -120,12 +116,15 @@ def build_optimizer(cfg: CfgNode, model: torch.nn.Module) -> torch.optim.Optimiz
     """
     Build an optimizer from config.
     """
+
+
     params = get_default_optimizer_params(
         model,
         base_lr=cfg.SOLVER.BASE_LR,
         weight_decay_norm=cfg.SOLVER.WEIGHT_DECAY_NORM,
         bias_lr_factor=cfg.SOLVER.BIAS_LR_FACTOR,
         weight_decay_bias=cfg.SOLVER.WEIGHT_DECAY_BIAS,
+        # overrides=model.overrides,
     )
 
     optimizer_type = cfg.SOLVER.OPTIMIZER
@@ -155,29 +154,11 @@ def build_optimizer(cfg: CfgNode, model: torch.nn.Module) -> torch.optim.Optimiz
     else:
         raise NotImplementedError(f"no optimizer type {optimizer_type}")
 
-def gradient_clipping(optimizer: Type[torch.optim.Optimizer]):
-
-    def grad_clipper(p):
-        torch.nn.utils.clip_grad_norm_(p, 1)
-
-    def optimizer_wgc_step(self, closure=None):
-        for group in self.param_groups:
-            for p in group["params"]:
-                grad_clipper(p)
-        super(type(self), self).step(closure)
-
-    OptimizerWithGradientClip = type(
-        optimizer.__name__ + "WithGradientClip",
-        (optimizer,),
-        {"step": optimizer_wgc_step},
-    )
-    return OptimizerWithGradientClip
 
 
 def get_default_optimizer_params(
     model: torch.nn.Module,
     base_lr: Optional[float] = None,
-    # lr_factor: Optional[float] = None,
     weight_decay: Optional[float] = None,
     weight_decay_norm: Optional[float] = None,
     bias_lr_factor: Optional[float] = 1.0,
@@ -201,14 +182,14 @@ def get_default_optimizer_params(
             weight decay values for all module parameters named `embedding`.
 
     For common detection models, ``weight_decay_norm`` is the only option
-    needed to be set. `
+    needed to be set. ``bias_lr_factor,weight_decay_bias`` are legacy settings
+    from Detectron1 that are not found useful.
 
     Example:
     ::
         torch.optim.SGD(get_default_optimizer_params(model, weight_decay_norm=0),
                        lr=0.01, weight_decay=1e-4, momentum=0.9)
     """
-
     if overrides is None:
         overrides = {}
     defaults = {}
@@ -218,6 +199,8 @@ def get_default_optimizer_params(
         defaults["weight_decay"] = weight_decay
     bias_overrides = {}
     if bias_lr_factor is not None and bias_lr_factor != 1.0:
+        # NOTE: unlike Detectron v1, we now by default make bias hyperparameters
+        # exactly the same as regular weights.
         if base_lr is None:
             raise ValueError("bias_lr_factor requires base_lr")
         bias_overrides["lr"] = base_lr * bias_lr_factor
@@ -246,7 +229,6 @@ def get_default_optimizer_params(
     for module_name, module in model.named_modules():
         for param_name, value in module.named_parameters(recurse=False):
             if not value.requires_grad:
-                # print(module_name, param_name)
                 continue
             # Avoid duplicating parameters
             if value in memo:
@@ -256,49 +238,75 @@ def get_default_optimizer_params(
             hyperparams = copy.copy(defaults)
             if isinstance(module, norm_module_types) and weight_decay_norm is not None:
                 hyperparams["weight_decay"] = weight_decay_norm
+
+            # for prefix in overrides.get("prefix", {}):
+            #     if prefix in module_name:
+            #         hyperparams["lr"] *= 20
+
             hyperparams.update(overrides.get(param_name, {}))
-
-            for prefix in overrides.get("prefix", []):
-                if prefix in module_name:
-                    # hyperparams["lr"] *= lr_factor
-                    print(module_name, param_name, hyperparams)
-
             params.append({"params": [value], **hyperparams})
-
     return params
-    # return reduce_param_groups(params)
 
 
-def _expand_param_groups(params: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # Transform parameter groups into per-parameter structure.
-    # Later items in `params` can overwrite parameters set in previous items.
-    ret = defaultdict(dict)
-    for item in params:
-        assert "params" in item
-        cur_params = {x: y for x, y in item.items() if x != "params"}
-        for param in item["params"]:
-            ret[param].update({"params": [param], **cur_params})
-    return list(ret.values())
 
+class CyclicScheduler(torch.optim.lr_scheduler._LRScheduler):
+    def __init__(
+        self,
+        optimizer,
+        base_lr,
+        anneal_decay=0.01,
+        anneal_iters=10,
+        anneal_strategy='cos',
+        last_epoch=-1
+    ):
+        base_lrs = self._format_param(optimizer, base_lr)
 
-def reduce_param_groups(params: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # Reorganize the parameter groups and merge duplicated groups.
-    # The number of parameter groups needs to be as small as possible in order
-    # to efficiently use the PyTorch multi-tensor optimizer. Therefore instead
-    # of using a parameter_group per single parameter, we reorganize the
-    # parameter groups and merge duplicated groups. This approach speeds
-    # up multi-tensor optimizer significantly.
-    params = _expand_param_groups(params)
-    groups = defaultdict(list)  # re-group all parameter groups by their hyperparams
-    for item in params:
-        cur_params = tuple((x, y) for x, y in item.items() if x != "params")
-        groups[cur_params].extend(item["params"])
-    ret = []
-    for param_keys, param_values in groups.items():
-        cur = {kv[0]: kv[1] for kv in param_keys}
-        cur["params"] = param_values
-        ret.append(cur)
-    return ret
+        for base_lr, group in zip(base_lrs, optimizer.param_groups):
+            group['start_lr'] = base_lr
+            group['end_lr'] = base_lr * anneal_decay
+
+        if anneal_strategy not in ['cos', 'linear']:
+            raise ValueError("anneal_strategy must by one of 'cos' or 'linear', "
+                             "instead got {}".format(anneal_strategy))
+        elif anneal_strategy == 'cos':
+            self.anneal_func = self._cosine_anneal
+        elif anneal_strategy == 'linear':
+            self.anneal_func = self._linear_anneal
+        if not isinstance(anneal_iters, int) or anneal_iters < 0:
+            raise ValueError("anneal_iters must be equal or greater than 0, got {}".format(
+                             anneal_iters))
+        self.anneal_iters = anneal_iters
+        super(CyclicScheduler, self).__init__(optimizer, last_epoch)
+
+    @staticmethod
+    def _format_param(optimizer, lrs):
+        if isinstance(lrs, (list, tuple)):
+            if len(lrs) != len(optimizer.param_groups):
+                raise ValueError("lrs must have the same length as "
+                                 "optimizer.param_groups: lrs has {}, "
+                                 "optimizer.param_groups has {}".format(
+                                     len(lrs), len(optimizer.param_groups)))
+            return lrs
+        else:
+            return [lrs] * len(optimizer.param_groups)
+
+    @staticmethod
+    def _linear_anneal(t):
+        return t
+
+    @staticmethod
+    def _cosine_anneal(t):
+        return (1 - math.cos(math.pi * t)) / 2
+
+    def get_lr(self):
+        progress = self._step_count % self.anneal_iters
+
+        t = max(0, min(1, progress / max(1, self.anneal_iters)))
+        alpha = self.anneal_func(t)
+
+        return [group['end_lr'] * alpha + group["start_lr"] * (1 - alpha)
+                for group in self.optimizer.param_groups]
+
 
 
 
@@ -310,14 +318,14 @@ def build_lr_scheduler(
     """
     name = cfg.SOLVER.LR_SCHEDULER_NAME
 
-    if name == "CyclicLR":
-        sched = CyclicScheduler(
-            optimizer,
-            cfg.SOLVER.BASE_LR,
-            anneal_decay=cfg.SOLVER.ANNEAL_DECAY,
-            anneal_iters=cfg.SOLVER.ANNEAL_ITERS,
-        )
-        return sched
+    # sched = CyclicScheduler(
+    #     optimizer,
+    #     cfg.SOLVER.BASE_LR,
+    #     anneal_decay=cfg.SOLVER.ANNEAL_DECAY,
+    #     anneal_iters=cfg.SOLVER.ANNEAL_ITERS,
+    # )
+    # return sched
+
 
     if name == "WarmupMultiStepLR":
         steps = [x for x in cfg.SOLVER.STEPS if x <= cfg.SOLVER.MAX_ITER]

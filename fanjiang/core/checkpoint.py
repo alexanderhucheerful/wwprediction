@@ -41,7 +41,6 @@ class Checkpointer:
     def __init__(
         self,
         model: nn.Module,
-        model_ema = None,
         save_dir: str = "",
         *,
         save_to_disk: bool = True,
@@ -61,7 +60,6 @@ class Checkpointer:
         if isinstance(model, (DistributedDataParallel, DataParallel)):
             model = model.module
         self.model = model
-        self.model_ema = model_ema
         self.checkpointables: Dict[str, Any] = {}
         for k, v in checkpointables.items():
             self.add_checkpointable(k, v)
@@ -90,11 +88,6 @@ class Checkpointer:
             )
         self.checkpointables[key] = checkpointable
 
-    def update(self, iteration):
-        if self.model_ema is not None:
-            self.model_ema.update(self.model, iteration)
-
-
     def save(self, name: str, **kwargs: Any) -> None:
         """
         Dump model and checkpointables to a file.
@@ -108,10 +101,6 @@ class Checkpointer:
 
         data = {}
         data["model"] = self.model.state_dict()
-
-        if self.model_ema is not None:
-            data["model_ema"] = self.model_ema.module.state_dict()
-
         for key, obj in self.checkpointables.items():
             data[key] = obj.state_dict()
         data.update(kwargs)
@@ -125,7 +114,7 @@ class Checkpointer:
         self.tag_last_checkpoint(basename)
 
     def load(
-        self, path: str, checkpointables: Optional[List[str]] = None, use_ema=False
+        self, path: str, checkpointables: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Load from the given checkpoint.
@@ -145,13 +134,14 @@ class Checkpointer:
             # no checkpoint provided
             self.logger.info("No checkpoint found. Initializing model from scratch")
             return {}
+
         self.logger.info("[Checkpointer] Loading from {} ...".format(path))
         if not os.path.isfile(path):
             path = self.path_manager.get_local_path(path)
             assert os.path.isfile(path), "Checkpoint {} not found!".format(path)
 
         checkpoint = self._load_file(path)
-        incompatible = self._load_model(checkpoint, use_ema=use_ema)
+        incompatible = self._load_model(checkpoint)
         if (
             incompatible is not None
         ):  # handle some existing subclasses that returns None
@@ -249,7 +239,7 @@ class Checkpointer:
         """
         return torch.load(f, map_location=torch.device("cpu"))
 
-    def _load_model(self, checkpoint: Any, use_ema=False) -> _IncompatibleKeys:
+    def _load_model(self, checkpoint: Any) -> _IncompatibleKeys:
         """
         Load weights from a checkpoint.
 
@@ -267,11 +257,7 @@ class Checkpointer:
             :func:`torch.nn.Module.load_state_dict`, but with extra support
             for ``incorrect_shapes``.
         """
-        if use_ema:
-            checkpoint_state_dict = checkpoint.pop("model_ema")
-        else:
-            checkpoint_state_dict = checkpoint.pop("model")
-
+        checkpoint_state_dict = checkpoint.pop("model")
         self._convert_ndarray_to_tensor(checkpoint_state_dict)
 
         # if the state_dict comes from a model that was wrapped in a
@@ -425,8 +411,6 @@ class PeriodicCheckpointer:
         iteration = int(iteration)
         additional_state = {"iteration": iteration}
         additional_state.update(kwargs)
-
-        self.checkpointer.update(iteration)
 
         if (iteration + 1) % self.period == 0:
             self.checkpointer.save(

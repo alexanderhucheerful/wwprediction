@@ -9,13 +9,19 @@ from typing import List, Union
 import torch
 from fanjiang.utils.comm import get_world_size, is_main_process
 from fanjiang.utils.logger import log_every_n_seconds, log_first_n
+from torch import nn
 from tabulate import tabulate
 from termcolor import colored
-from torch import nn
-
-__all__ = ["print_csv_format", "inference_on_dataset", "DatasetEvaluator"]
 
 def print_csv_format(results):
+    """
+    Print main metrics in a format similar to Detectron,
+    so that they are easy to copypaste into a spreadsheet.
+
+    Args:
+        results (OrderedDict[dict]): task_name -> {metric -> score}
+            unordered dict can also be printed, but in arbitrary order
+    """
     assert isinstance(results, Mapping) or not len(results), results
     results = dict(sorted(results.items()))
 
@@ -90,7 +96,7 @@ class DatasetEvaluator:
         """
         pass
 
-    def evaluate(self):
+    def evaluate(self, save_dir=None):
         """
         Evaluate/summarize the performance, after processing all input/output pairs.
 
@@ -131,10 +137,10 @@ class DatasetEvaluators(DatasetEvaluator):
         for evaluator in self._evaluators:
             evaluator.process(outputs)
 
-    def evaluate(self):
+    def evaluate(self, save_dir=None):
         results = OrderedDict()
         for evaluator in self._evaluators:
-            result = evaluator.evaluate()
+            result = evaluator.evaluate(save_dir)
             if is_main_process() and result is not None:
                 for k, v in result.items():
                     assert (
@@ -148,6 +154,8 @@ def inference_on_dataset(
     model,
     data_loader,
     evaluator: Union[DatasetEvaluator, List[DatasetEvaluator], None],
+    eval_num=1000,
+    save_dir=None,
 ):
     """
     Run model on the data_loader and evaluate the metrics with evaluator.
@@ -192,7 +200,10 @@ def inference_on_dataset(
         stack.enter_context(torch.no_grad())
 
         start_data_time = time.perf_counter()
-        for idx, inputs in enumerate(data_loader):
+        for idx, (inputs, info) in enumerate(data_loader):
+
+            for name in inputs:
+                inputs[name] = inputs[name].cuda(non_blocking=True)
 
             total_data_time += time.perf_counter() - start_data_time
             if idx == num_warmup:
@@ -202,12 +213,10 @@ def inference_on_dataset(
                 total_eval_time = 0
 
             start_compute_time = time.perf_counter()
-
-            outputs = model(inputs)
+            outputs = model(inputs, info=info)
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-
             total_compute_time += time.perf_counter() - start_compute_time
 
             start_eval_time = time.perf_counter()
@@ -235,6 +244,8 @@ def inference_on_dataset(
                 )
             start_data_time = time.perf_counter()
 
+            if (idx + 1) * num_devices >= eval_num:
+                break
 
     # Measure the time only for this worker (before the synchronization barrier)
     total_time = time.perf_counter() - start_time
@@ -252,13 +263,12 @@ def inference_on_dataset(
         )
     )
 
-    results = evaluator.evaluate()
+    results = evaluator.evaluate(save_dir)
 
     # An evaluator may return None when not in main process.
     # Replace it by an empty dict instead to make it easier for downstream code to handle
     if results is None:
         results = {}
-
     return results
 
 
@@ -275,4 +285,5 @@ def inference_context(model):
     model.eval()
     yield
     model.train(training_mode)
+
 

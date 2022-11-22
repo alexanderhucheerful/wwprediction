@@ -1,18 +1,18 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
 import ast
 import builtins
-import collections.abc as abc
 import importlib
 import inspect
 import logging
 import os
 import uuid
+from collections import abc
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import is_dataclass
 from typing import List, Tuple, Union
 import cloudpickle
 import yaml
-from omegaconf import DictConfig, ListConfig, OmegaConf, SCMode
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from fanjiang.utils.file_io import PathManager
 from fanjiang.utils.registry import _convert_target_to_string
@@ -40,19 +40,12 @@ class LazyCall:
     def __init__(self, target):
         if not (callable(target) or isinstance(target, (str, abc.Mapping))):
             raise TypeError(
-                f"target of LazyCall must be a callable or defines a callable! Got {target}"
+                "target of LazyCall must be a callable or defines a callable! Got {target}"
             )
         self._target = target
 
     def __call__(self, **kwargs):
-        if is_dataclass(self._target):
-            # omegaconf object cannot hold dataclass type
-            # https://github.com/omry/omegaconf/issues/784
-            target = _convert_target_to_string(self._target)
-        else:
-            target = self._target
-        kwargs["_target_"] = target
-
+        kwargs["_target_"] = self._target
         return DictConfig(content=kwargs, flags={"allow_objects": True})
 
 
@@ -158,7 +151,7 @@ def _patch_import():
 
 class LazyConfig:
     """
-    Provide methods to save, load, and overrides an omegaconf config object
+    Provid methods to save, load, and overrides an omegaconf config object
     which may contain definition of lazily-constructed objects.
     """
 
@@ -262,40 +255,19 @@ class LazyConfig:
             # not necessary, but makes yaml looks nicer
             _visit_dict_config(cfg, _replace_type_by_name)
 
-        save_pkl = False
         try:
-            dict = OmegaConf.to_container(
-                cfg,
-                # Do not resolve interpolation when saving, i.e. do not turn ${a} into
-                # actual values when saving.
-                resolve=False,
-                # Save structures (dataclasses) in a format that can be instantiated later.
-                # Without this option, the type information of the dataclass will be erased.
-                structured_config_mode=SCMode.INSTANTIATE,
-            )
-            dumped = yaml.dump(dict, default_flow_style=None, allow_unicode=True, width=9999)
             with PathManager.open(filename, "w") as f:
+                dict = OmegaConf.to_container(cfg, resolve=False)
+                dumped = yaml.dump(dict, default_flow_style=None, allow_unicode=True, width=9999)
                 f.write(dumped)
-
-            try:
-                _ = yaml.unsafe_load(dumped)  # test that it is loadable
-            except Exception:
-                logger.warning(
-                    "The config contains objects that cannot serialize to a valid yaml. "
-                    f"{filename} is human-readable but cannot be loaded."
-                )
-                save_pkl = True
         except Exception:
             logger.exception("Unable to serialize the config to yaml. Error:")
-            save_pkl = True
-
-        if save_pkl:
             new_filename = filename + ".pkl"
             try:
                 # retry by pickle
                 with PathManager.open(new_filename, "wb") as f:
                     cloudpickle.dump(cfg, f)
-                logger.warning(f"Config is saved using cloudpickle at {new_filename}.")
+                logger.warning(f"Config saved using cloudpickle at {new_filename} ...")
             except Exception:
                 pass
 
@@ -404,4 +376,3 @@ class LazyConfig:
             return black.format_str(py_str, mode=black.Mode())
         except black.InvalidInput:
             return py_str
-

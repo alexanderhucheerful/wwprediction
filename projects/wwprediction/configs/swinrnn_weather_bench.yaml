@@ -1,0 +1,86 @@
+OUTPUT_DIR: &output_dir "output/swinrnn_t2muv10tp_tf500_bs32_1x"
+
+MODEL:
+  DEVICE: "cuda"    
+  WITH_EMA: False
+  WITH_AMP: False
+  # WEIGHTS: "output/swinrnn_t2muv10tp_tf500_bs32_1x/model_final.pth"
+
+  GENERATOR:
+    name: "SwinRNN"
+    in_channels: 71 
+    out_channels: 69 
+    embed_dim: 96
+    noise_dim: 69 #256 
+    input_frames: 6 
+    future_frames: 20 
+    image_size: [32, 64] 
+    patch_size: 1 
+    window_size: 8
+    dims: [256, 256, 256, 256]
+    eval_index: [7, 23, 65, 66, 67]
+    with_vrnn: True 
+ 
+METRICS: 
+  MSE: 
+    name: "MSE"
+    interval: 6
+    eval_index: [7, 23, 65, 66, 67, 68]
+    eval_names: ["z", "t", "t2m", "u10", "v10", "tp"]
+    eval_frames: !!python/object/apply:eval ["[x for x in range(20)]"] 
+    
+SOLVER:
+  OPTIMIZER: "ADAMW"
+  BETAS: (0.9, 0.95)
+  IMS_PER_BATCH: 1 
+  BASE_LR: 0.0002
+  LR_SCHEDULER_NAME: WarmupCosineLR
+  STEPS: (20000,)
+  MAX_ITER: 30000 
+  # STEPS: (80000,)
+  WARMUP_ITERS: 2000  
+  CHECKPOINT_PERIOD: 1000 
+  CHECKPOINT_KEEP: 50 
+  WEIGHT_DECAY: 0.05   
+  CLIP_GRADIENTS: 
+    ENABLED: True
+    CLIP_TYPE: "norm"
+    CLIP_VALUE: 5.0
+
+DATASETS:
+  TRAIN:
+    WeatherBench:
+      name: "WeatherBench"
+      training: True
+      data_dir: "data/weather_bench"
+      step: 6
+      interval: 12 
+      input_times: 36
+      future_times: 120
+      years: ['1979', '2016']
+      names: ["geopotential", "temperature"]
+
+  TEST:
+    WeatherBench:
+      name: "WeatherBench"
+      training: False
+      data_dir: "data/weather_bench"
+      step: 6
+      interval: 48 
+      input_times: 36
+      future_times: 120
+      years: ['2017', '2018']
+      names: ["geopotential", "temperature"]
+DATALOADER:
+  NUM_WORKERS: 4 
+
+TEST:
+  EVAL_PERIOD: 1000 
+  EVAL_NUM: 1000 
+  SAVE_DIR: "output/swinrnn_t2muv10tp_tf500_bs32_1x" 
+
+VIS_PERIOD: 0
+LOG_PERIOD: 20
+
+VERSION: 2
+

@@ -1,3 +1,4 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
 from .config import CfgNode as CN
 
 # -----------------------------------------------------------------------------
@@ -21,20 +22,17 @@ _C = CN()
 _C.VERSION = 2
 
 _C.MODEL = CN()
-
-_C.MODEL.WITH_ADV = False # turn on adversarial training
-_C.MODEL.WITH_STY = False # turn on style loss
-_C.MODEL.WITH_REG = False # turn on R1 regularization 
-_C.MODEL.WITH_EMA = False # turn on moving average weight 
-_C.MODEL.WITH_AMP = False # turn on fp16 training 
-
 _C.MODEL.DEVICE = "cuda"
 _C.MODEL.WEIGHTS = ""
+_C.MODEL.WITH_EMA = False # turn on moving average weight
+_C.MODEL.WITH_AMP = False # turn on fp16 training
+
 
 # Values to be used for image normalization (BGR order, since INPUT.FORMAT defaults to BGR).
 # To train on images of different number of channels, just set different mean & std.
 # Default values are the mean pixel value from ImageNet: [103.53, 116.28, 123.675]
 _C.MODEL.PIXEL_MEAN = [103.530, 116.280, 123.675]
+# When using pre-trained models in Detectron1 or any MSRA models,
 # std has been absorbed into its conv1 weights, so the std needs to be set 1.
 # Otherwise, you can use [57.375, 57.120, 58.395] (ImageNet std)
 _C.MODEL.PIXEL_STD = [1.0, 1.0, 1.0]
@@ -81,7 +79,7 @@ _C.INPUT.RANDOM_FLIP = "horizontal"
 
 # `True` if cropping is used for data augmentation during training
 _C.INPUT.CROP = CN({"ENABLED": False})
-# Cropping type. See documentation of `fanjiang.data.transforms.RandomCrop` for explanation.
+# Cropping type. See documentation of `detectron2.data.transforms.RandomCrop` for explanation.
 _C.INPUT.CROP.TYPE = "relative_range"
 # Size of crop in range (0, 1] if CROP.TYPE is "relative" or "relative_range" and in number of
 # pixels if CROP.TYPE is "absolute"
@@ -143,7 +141,7 @@ _C.SOLVER.OPTIMIZER = "ADAM"
 _C.SOLVER.BETAS = (0.9, 0.99)
 
 # Options: WarmupMultiStepLR, WarmupCosineLR.
-# See fanjiang/solver/build.py for definition.
+# See detectron2/solver/build.py for definition.
 _C.SOLVER.LR_SCHEDULER_NAME = "WarmupMultiStepLR"
 
 _C.SOLVER.MAX_ITER = 40000
@@ -167,6 +165,10 @@ _C.SOLVER.WARMUP_FACTOR = 1.0 / 1000
 _C.SOLVER.WARMUP_ITERS = 1000
 _C.SOLVER.WARMUP_METHOD = "linear"
 
+
+_C.SOLVER.ANNEAL_ITERS = 1000
+_C.SOLVER.ANNEAL_DECAY = 0.01
+
 # Save a checkpoint after every this number of iterations
 _C.SOLVER.CHECKPOINT_PERIOD = 5000
 _C.SOLVER.CHECKPOINT_KEEP = 100
@@ -185,6 +187,10 @@ _C.SOLVER.IMS_PER_BATCH = 16
 # See documentation of `DefaultTrainer.auto_scale_workers` for details:
 _C.SOLVER.REFERENCE_WORLD_SIZE = 0
 
+# Detectron v1 (and previous detection code) used a 2x higher LR and 0 WD for
+# biases. This is not useful (at least for recent models). You should avoid
+# changing these and they exist only to reproduce Detectron v1 training if
+# desired.
 _C.SOLVER.BIAS_LR_FACTOR = 1.0
 _C.SOLVER.WEIGHT_DECAY_BIAS = _C.SOLVER.WEIGHT_DECAY
 
@@ -200,9 +206,6 @@ _C.SOLVER.CLIP_GRADIENTS.CLIP_VALUE = 1.0
 # Floating point number p for L-p norm to be used with the "norm"
 # gradient clipping type; for L-inf, please specify .inf
 _C.SOLVER.CLIP_GRADIENTS.NORM_TYPE = 2.0
-
-_C.SOLVER.TEACHER_FORCING = CN({"ENABLED": False})
-_C.SOLVER.TEACHER_FORCING.ITERS = 500
 
 # Enable automatic mixed precision for training
 # Note that this does not change model's inference behavior.
@@ -224,6 +227,7 @@ _C.TEST.EVAL_PERIOD = 0
 # Maximum number of detections to return per image during inference (100 is
 # based on the limit established for the COCO dataset).
 _C.TEST.EVAL_NUM = 1000
+_C.TEST.SAVE_DIR = ""
 
 
 # ---------------------------------------------------------------------------- #
@@ -231,7 +235,6 @@ _C.TEST.EVAL_NUM = 1000
 # ---------------------------------------------------------------------------- #
 # Directory where output files are written
 _C.OUTPUT_DIR = "./output"
-_C.DATA_DIR = "./data"
 # Set seed to negative to fully randomize everything.
 # Set seed to positive to use a fixed seed. Note that a fixed seed increases
 # reproducibility but does not guarantee fully deterministic behavior.
@@ -251,7 +254,7 @@ _C.LOG_PERIOD = 0
 # You can set them in command line or config files,
 # and access it with:
 #
-# from fanjiang.config import global_cfg
+# from detectron2.config import global_cfg
 # print(global_cfg.HACK)
 #
 # Do not commit any configs into it.

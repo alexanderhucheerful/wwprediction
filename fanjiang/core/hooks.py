@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) Facebook, Inc. and its affiliates.
+
 import datetime
 import logging
 import os
@@ -136,6 +139,7 @@ class CallbackHook(HookBase):
     def after_step(self):
         if self._after_step:
             self._after_step(self.trainer)
+
 
 class IterationTimer(HookBase):
     """

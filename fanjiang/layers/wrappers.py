@@ -1,11 +1,19 @@
-import math
-from typing import List
-from einops import rearrange
+# Copyright (c) Facebook, Inc. and its affiliates.
+"""
+Wrappers around on some nn functions, mainly to support empty tensors.
 
+Ideally, add support directly in PyTorch to empty tensors in those functions.
+
+These can be removed once https://github.com/pytorch/pytorch/issues/12013
+is implemented
+"""
+
+from typing import List
 import torch
 from torch import nn
 from torch.nn import functional as F
-
+from einops import rearrange
+import math
 
 def cat(tensors: List[torch.Tensor], dim: int = 0):
     """
@@ -58,6 +66,7 @@ class Conv2d(torch.nn.Conv2d):
         norm = kwargs.pop("norm", None)
         activation = kwargs.pop("activation", None)
         super().__init__(*args, **kwargs)
+
         self.mode = mode
         self.norm = norm
         self.activation = activation
@@ -76,8 +85,9 @@ class Conv2d(torch.nn.Conv2d):
                     self.norm, torch.nn.SyncBatchNorm
                 ), "SyncBatchNorm does not support empty inputs!"
 
+
         if self.mode is not None:
-            x = F.pad(x, (self.padding[1], self.padding[1]), mode=self.mode[1])
+            x = F.pad(x, (self.padding[1], self.padding[1], 0, 0), mode=self.mode[1])
             x = F.pad(x, (0, 0, self.padding[0], self.padding[0]), mode=self.mode[0])
             x = F.conv2d(
                 x, self.weight, self.bias, self.stride, 0, self.dilation, self.groups
@@ -87,11 +97,55 @@ class Conv2d(torch.nn.Conv2d):
                 x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups
             )
 
+        # x = F.conv2d(
+        #     x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups
+        # )
         if self.norm is not None:
             x = self.norm(x)
         if self.activation is not None:
             x = self.activation(x)
         return x
+
+
+# class AdaIN(nn.Module):
+#     def __init__(self, style_channels, channels):
+#         super().__init__()
+#         self.norm = nn.InstanceNorm1d(channels)
+#         self.affine = EqualLinear(style_channels, channels * 2)
+#         self.affine.bias.data[:channels] = 1
+#         self.affine.bias.data[channels:] = 0
+
+#     # def forward(self, x, style):
+#     #     style = self.affine(style).unsqueeze(2).unsqueeze(3)
+#     #     gamma, beta = style.chunk(2, 1)
+#     #     out = self.norm(x)
+#     #     out = gamma * out + beta
+#     #     return rearrange(out, 'n c h w -> n (h w) c')
+
+#     def forward(self, x, ws):
+#         ws = self.affine(ws).unsqueeze(1)
+#         gamma, beta = ws.chunk(2, 2)
+#         x = x.transpose(1, 2)
+#         x = self.norm(x)
+#         x = x.transpose(1, 2)
+#         out = gamma * x + beta
+#         return out
+
+
+class AdaIN(nn.Module):
+    def __init__(self, in_channel, style_dim):
+        super().__init__()
+        self.norm = nn.InstanceNorm1d(in_channel)
+        self.style = EqualLinear(style_dim, in_channel * 2)
+
+    def forward(self, input, style):
+        style = self.style(style).unsqueeze(-1)
+        gamma, beta = style.chunk(2, 1)
+
+        out = self.norm(input)
+        out = gamma * out + beta
+        return out
+
 
 class ModulatedConv2d(nn.Module):
     def __init__(
@@ -146,8 +200,6 @@ def nonzero_tuple(x):
     else:
         return x.nonzero(as_tuple=True)
 
-
-
 def aligned_bilinear(tensor, factor):
     assert tensor.dim() == 4
     assert factor >= 1
@@ -170,3 +222,4 @@ def aligned_bilinear(tensor, factor):
         mode="replicate"
     )
     return tensor[:, :, :oh - 1, :ow - 1]
+

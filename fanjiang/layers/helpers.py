@@ -3,7 +3,7 @@ from itertools import repeat
 
 import numpy as np
 import torch
-
+from einops import rearrange
 
 def random_crop(inputs, border=0, size=256):
     H, W = inputs.shape[-2:]
@@ -14,14 +14,14 @@ def random_crop(inputs, border=0, size=256):
         x1 = np.random.randint(x1, x2 - size + 1)
         y1 = np.random.randint(y1, y2 - size + 1)
         x2 = x1 + size
-        y2 = y1 + size 
+        y2 = y1 + size
     return x1, y1, x2, y2
 
 
 def make_grid(shape, device, ndim=2):
     yy = torch.linspace(0, 1, steps=shape[-2], device=device)
     xx = torch.linspace(0, 1, steps=shape[-1], device=device)
- 
+
     if ndim == 2:
         grids = torch.stack(torch.meshgrid([yy, xx]), dim=0)
         grids = grids.unsqueeze(0).repeat(shape[0], 1, 1, 1)
@@ -50,6 +50,22 @@ def compute_locations(h, w, stride, device):
      shift_x = shift_x.clamp(0, w - 1).long()
      shift_y = shift_y.clamp(0, h - 1).long()
      return shift_x, shift_y
+
+
+def positional_encoding(grids, dim=1, L=12):
+    coords = []
+    for i in range(L):
+        coord = torch.cat(
+            [
+                torch.sin(2 ** i * np.pi * grids),
+                torch.cos(2 ** i * np.pi * grids)
+            ], dim=dim
+        )
+        coords.append(coord)
+    coords = torch.cat(coords, dim=dim)
+    coords = rearrange(coords, 'n h w c -> n c h w')
+    return coords
+
 
 
 # From PyTorch internals

@@ -1,23 +1,30 @@
 import logging
 import time
 import weakref
+from collections import OrderedDict
+from copy import deepcopy
 from typing import List, Mapping, Optional
+from einops.einops import rearrange
 
 import fanjiang.utils.comm as comm
 import numpy as np
 import torch
+import torch.nn.functional as F
+from fanjiang.builder import build_criterions, build_metrics, build_model
+from fanjiang.dataset import create_test_loader, create_train_loader
 from fanjiang.utils.events import EventStorage, get_event_storage
-from fanjiang.utils.logger import _log_api_usage
-from torch.nn.parallel import DistributedDataParallel
+from fanjiang.utils.logger import _log_api_usage, setup_logger
+from torch.nn.parallel import DataParallel, DistributedDataParallel
 from torch.cuda.amp import GradScaler, autocast
 
-from fairscale.nn.data_parallel import FullyShardedDataParallel
-# from fairscale.nn.data_parallel import ShardedDataParallel
-
 from . import hooks
+from .checkpoint import Checkpointer
+from .defaults import TensorboardXWriter, default_writers
+from .evaluator import inference_on_dataset, print_csv_format
+from .optimizer import build_lr_scheduler, build_optimizer
+from torch.optim.swa_utils import AveragedModel
 
-__all__ = ["TrainerBase", "SimpleTrainer", "create_ddp_model"]
-
+__all__ = ["TrainerBase", "SimpleTrainer", "AdversarialTrainer"]
 
 HookBase = hooks.HookBase
 
@@ -35,10 +42,7 @@ def create_ddp_model(model, *, fp16_compression=False, **kwargs):
         return model
     if "device_ids" not in kwargs:
         kwargs["device_ids"] = [comm.get_local_rank()]
-
     ddp = DistributedDataParallel(model, **kwargs)
-    # ddp = FullyShardedDataParallel(model)
-
     if fp16_compression:
         from torch.distributed.algorithms.ddp_comm_hooks import \
             default as comm_hooks
@@ -46,6 +50,95 @@ def create_ddp_model(model, *, fp16_compression=False, **kwargs):
         ddp.register_comm_hook(state=None, hook=comm_hooks.fp16_compress_hook)
     return ddp
 
+
+def auto_scale_workers(cfg, num_workers: int):
+    """
+    When the config is defined for certain number of workers (according to
+    ``cfg.SOLVER.REFERENCE_WORLD_SIZE``) that's different from the number of
+    workers currently in use, returns a new cfg where the total batch size
+    is scaled so that the per-GPU batch size stays the same as the
+    original ``IMS_PER_BATCH // REFERENCE_WORLD_SIZE``.
+
+    Other config options are also scaled accordingly:
+    * training steps and warmup steps are scaled inverse proportionally.
+    * learning rate are scaled proportionally, following :paper:`ImageNet in 1h`.
+
+    For example, with the original config like the following:
+
+    .. code-block:: yaml
+
+        IMS_PER_BATCH: 16
+        BASE_LR: 0.1
+        REFERENCE_WORLD_SIZE: 8
+        MAX_ITER: 5000
+        STEPS: (4000,)
+        CHECKPOINT_PERIOD: 1000
+
+    When this config is used on 16 GPUs instead of the reference number 8,
+    calling this method will return a new config with:
+
+    .. code-block:: yaml
+
+        IMS_PER_BATCH: 32
+        BASE_LR: 0.2
+        REFERENCE_WORLD_SIZE: 16
+        MAX_ITER: 2500
+        STEPS: (2000,)
+        CHECKPOINT_PERIOD: 500
+
+    Note that both the original config and this new config can be trained on 16 GPUs.
+    It's up to user whether to enable this feature (by setting ``REFERENCE_WORLD_SIZE``).
+
+    Returns:
+        CfgNode: a new config. Same as original if ``cfg.SOLVER.REFERENCE_WORLD_SIZE==0``.
+    """
+    old_world_size = cfg.SOLVER.REFERENCE_WORLD_SIZE
+    if old_world_size == 0 or old_world_size == num_workers:
+        return cfg
+    cfg = cfg.clone()
+    frozen = cfg.is_frozen()
+    cfg.defrost()
+
+    assert (
+        cfg.SOLVER.IMS_PER_BATCH % old_world_size == 0
+    ), "Invalid REFERENCE_WORLD_SIZE in config!"
+    scale = num_workers / old_world_size
+    bs = cfg.SOLVER.IMS_PER_BATCH = int(round(cfg.SOLVER.IMS_PER_BATCH * scale))
+    lr = cfg.SOLVER.BASE_LR = cfg.SOLVER.BASE_LR * scale
+    max_iter = cfg.SOLVER.MAX_ITER = int(round(cfg.SOLVER.MAX_ITER / scale))
+    warmup_iter = cfg.SOLVER.WARMUP_ITERS = int(round(cfg.SOLVER.WARMUP_ITERS / scale))
+    cfg.SOLVER.STEPS = tuple(int(round(s / scale)) for s in cfg.SOLVER.STEPS)
+    cfg.TEST.EVAL_PERIOD = int(round(cfg.TEST.EVAL_PERIOD / scale))
+    cfg.SOLVER.CHECKPOINT_PERIOD = int(round(cfg.SOLVER.CHECKPOINT_PERIOD / scale))
+    cfg.SOLVER.REFERENCE_WORLD_SIZE = num_workers  # maintain invariant
+    logger = logging.getLogger(__name__)
+    logger.info(
+        f"Auto-scaling the config to batch_size={bs}, learning_rate={lr}, "
+        f"max_iter={max_iter}, warmup={warmup_iter}."
+    )
+
+    if frozen:
+        cfg.freeze()
+    return cfg
+
+
+class EMA:
+    def __init__(self, model, decay=0.9999, warmup_iters=1000):
+        self.model = deepcopy(model).eval()
+        self.decay = lambda x: decay * (1 - np.exp(-x / warmup_iters))
+
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+
+    def update(self, model, iter):
+        beta = self.decay(iter)
+
+        with torch.no_grad():
+            for p_ema, p in zip(self.model.parameters(), model.parameters()):
+                p_ema.copy_(p.lerp(p_ema, beta))
+
+            for b_ema, b in zip(self.model.buffers(), model.buffers()):
+                b_ema.copy_(b)
 
 class TrainerBase:
     """
@@ -71,7 +164,6 @@ class TrainerBase:
         self.iter: int = 0
         self.start_iter: int = 0
         self.max_iter: int
-        self.start_epoch: int = 0
         self.storage: EventStorage
         _log_api_usage("trainer." + self.__class__.__name__)
 
@@ -107,12 +199,10 @@ class TrainerBase:
         with EventStorage(start_iter) as self.storage:
             try:
                 self.before_train()
-
                 for self.iter in range(start_iter, max_iter):
                     self.before_step()
                     self.run_step()
                     self.after_step()
-
                 # self.iter == max_iter can be used by `after_train` to
                 # tell whether the training successfully finished or failed
                 # due to exceptions.
@@ -197,7 +287,7 @@ class SimpleTrainer(TrainerBase):
     or write your own training loop.
     """
 
-    def __init__(self, model, data_loader, optimizer, cfg):
+    def __init__(self, model, data_loader, optimizer):
         """
         Args:
             model: a torch Module. Takes a data from data_loader and returns a
@@ -220,24 +310,6 @@ class SimpleTrainer(TrainerBase):
         self._data_loader_iter = iter(data_loader)
         self.optimizer = optimizer
 
-        self.cfg = cfg
-        self.grad_scaler = GradScaler(enabled=cfg.amp)
-
-    def adjust_sampling_ratio(self):
-        sr = 0
-        if self.cfg.teacher_forcing.enabled:
-            k = self.cfg.teacher_forcing.k
-            sr = k / (k + np.exp((self.iter + 1) / k))
-            sr = sr * (sr > 1e-6)
-        self.storage.put_scalar("sampling_ratio", sr)
-        return sr
-
-    def clip_grad(self):
-        if self.cfg.clip_grad.enabled:
-            self.grad_scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.clip_grad.max_norm)
-
-
     def run_step(self):
         """
         Implement the standard training logic described above.
@@ -247,36 +319,34 @@ class SimpleTrainer(TrainerBase):
         """
         If you want to do something with the data, you can wrap the dataloader.
         """
+        data = next(self._data_loader_iter)
+        data_time = time.perf_counter() - start
 
-        self.optimizer.zero_grad()
-
-        for _ in range(self.cfg.accumulation_steps):
-
-            start_j = time.perf_counter()
-            data = next(self._data_loader_iter)
-            data["sampling_ratio"] = self.adjust_sampling_ratio()
-            data_time = time.perf_counter() - start_j
-
-            with autocast(enabled=self.cfg.amp):
-                loss_dict = self.model(data)
-
-            losses = sum(loss_dict.values()) / self.cfg.accumulation_steps
-
-            if self.cfg.deepspeed:
-                self.model.backward(losses)
-            else:
-                self.grad_scaler.scale(losses).backward()
-
-        self.clip_grad()
-
-        if self.cfg.deepspeed:
-            self.model.step()
+        """
+        If you want to do something with the losses, you can wrap the model.
+        """
+        loss_dict = self.model(data)
+        if isinstance(loss_dict, torch.Tensor):
+            losses = loss_dict
+            loss_dict = {"total_loss": loss_dict}
         else:
-            self.grad_scaler.step(self.optimizer)
-            self.grad_scaler.update()
+            losses = sum(loss_dict.values())
+
+        """
+        If you need to accumulate gradients or do something similar, you can
+        wrap the optimizer with your custom `zero_grad()` method.
+        """
+        self.optimizer.zero_grad()
+        losses.backward()
 
         self._write_metrics(loss_dict, data_time)
 
+        """
+        If you need gradient clipping/scaling or other processing, you can
+        wrap the optimizer with your custom `step()` method. But it is
+        suboptimal as explained in https://arxiv.org/abs/2006.15704 Sec 3.2.4
+        """
+        self.optimizer.step()
 
     def _write_metrics(
         self,
@@ -319,7 +389,6 @@ class SimpleTrainer(TrainerBase):
                 k: np.mean([x[k] for x in all_metrics_dict]) for k in all_metrics_dict[0].keys()
             }
             total_losses_reduced = sum(metrics_dict.values())
-
             if not np.isfinite(total_losses_reduced):
                 raise FloatingPointError(
                     f"Loss became infinite or NaN at iteration={storage.iter}!\n"
@@ -338,5 +407,240 @@ class SimpleTrainer(TrainerBase):
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         self.optimizer.load_state_dict(state_dict["optimizer"])
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+class AdversarialTrainer(TrainerBase):
+    def __init__(self, cfg):
+        """
+        Args:
+            cfg (CfgNode):
+        """
+        super().__init__()
+        self.logger = logging.getLogger(__name__)
+        if not self.logger.isEnabledFor(logging.INFO):
+            setup_logger()
+
+        self.with_ema = cfg.MODEL.WITH_EMA
+        self.with_amp = cfg.MODEL.WITH_AMP
+
+        self.device = cfg.MODEL.DEVICE
+        self.vis_period = cfg.VIS_PERIOD
+        self.start_iter = 0
+        self.max_iter = cfg.SOLVER.MAX_ITER
+        self.warmup_iter = cfg.SOLVER.WARMUP_ITERS
+        self.anneal_iter = cfg.SOLVER.ANNEAL_ITERS
+
+        self.cfg = cfg
+        model = self.build_models(cfg.MODEL.GENERATOR).to(self.device)
+        n_params = count_parameters(model)
+        self.logger.info('Number of parameters in the model: ' + f'{n_params / 1e6:.2f} M.')
+
+        optimizer = build_optimizer(cfg, model)
+        scheduler = build_lr_scheduler(cfg, optimizer)
+        self.grad_scaler = GradScaler(enabled=self.with_amp)
+        # self.grad_scaler = NativeScaler(enabled=self.with_amp)
+
+        if self.with_ema:
+            self.model_ema = EMA(model)
+
+        model = create_ddp_model(model, broadcast_buffers=False)
+
+        self.model = model
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+
+        train_loader = create_train_loader(cfg)
+        self.test_loader = create_test_loader(cfg)
+        self.train_loader_iter = iter(train_loader)
+
+        self.metrics = build_metrics(cfg.METRICS)
+        self.criterions = build_criterions(cfg.CRITERIONS)
+
+        self.checkpointer = Checkpointer(
+            self.model,
+            cfg.OUTPUT_DIR,
+            save_to_disk=comm.is_main_process,
+            trainer=weakref.proxy(self),
+        )
+
+        if self.with_ema:
+            self.checkpointer_ema = Checkpointer(
+                self.model_ema.model,
+                cfg.OUTPUT_DIR,
+                save_to_disk=comm.is_main_process,
+                trainer=weakref.proxy(self),
+            )
+
+
+    @classmethod
+    def build_models(cls, cfg):
+        model = build_model(cfg)
+        logger = logging.getLogger(__name__)
+        logger.info("Model:\n{}".format(model))
+        return model
+
+    def resume_or_load(self, resume=True):
+        """
+        If `resume==True` and `cfg.OUTPUT_DIR` contains the last checkpoint (defined by
+        a `last_checkpoint` file), resume from the file. Resuming means loading all
+        available states (eg. optimizer and scheduler) and update iteration counter
+        from the checkpoint. ``cfg.MODEL.WEIGHTS`` will not be used.
+
+        Otherwise, this is considered as an independent training. The method will load model
+        weights from the file `cfg.MODEL.WEIGHTS` (but will not load other states) and start
+        from iteration 0.
+
+        Args:
+            resume (bool): whether to do resume or not
+        """
+        self.checkpointer.resume_or_load(
+            self.cfg.MODEL.WEIGHTS, resume=resume
+        )
+
+        if self.with_ema:
+            self.checkpointer_ema.resume_or_load(
+                self.cfg.MODEL.WEIGHTS, resume=resume
+            )
+
+        if resume and self.checkpointer.has_checkpoint():
+            # The checkpoint stores the training iteration that just finished, thus we start
+            # at the next iteration
+            self.start_iter = self.iter + 1
+
+
+    def build_hooks(self):
+        """
+        Build a list of default hooks, including timing, evaluation,
+        checkpointing, lr scheduling, writing events.
+        Returns:
+            list[HookBase]:
+        """
+        cfg = self.cfg.clone()
+        ret = [
+            hooks.IterationTimer(),
+            hooks.LRScheduler(self.optimizer, self.scheduler),
+        ]
+
+        if comm.is_main_process():
+            ret.append(hooks.PeriodicCheckpointer(
+                    self.checkpointer_ema if self.with_ema else self.checkpointer,
+                    cfg.SOLVER.CHECKPOINT_PERIOD,
+                    max_to_keep=cfg.SOLVER.CHECKPOINT_KEEP,
+                    file_prefix="model"
+                )
+            )
+        ret.append(hooks.EvalHook(cfg.TEST.EVAL_PERIOD, self.test))
+
+        if comm.is_main_process():
+            # Here the default print/log frequency of each writer is used.
+            # run writers in the end, so that evaluation metrics are written
+            ret.append(hooks.PeriodicWriter(default_writers(cfg), period=cfg.LOG_PERIOD))
+        return ret
+
+
+    def train(self):
+        """
+        Run training.
+
+        Returns:
+            OrderedDict of results, if evaluation is enabled. Otherwise None.
+        """
+        self.register_hooks(self.build_hooks())
+        super().train(self.start_iter, self.max_iter)
+
+
+    def test(self):
+        results = OrderedDict()
+        for _, dataset_name in enumerate(self.cfg.DATASETS.TEST):
+            results_i = inference_on_dataset(
+                self.model_ema.model if self.with_ema else self.model,
+                self.test_loader,
+                self.metrics,
+                self.cfg.TEST.EVAL_NUM,
+                self.cfg.TEST.SAVE_DIR,
+            )
+            results[dataset_name] = results_i
+
+            if comm.is_main_process():
+                assert isinstance(
+                    results_i, dict
+                ), "Evaluator must return a dict on the main process. Got {} instead.".format(
+                    results_i
+                )
+                print_csv_format(results_i)
+
+        if len(results) == 1:
+            results = list(results.values())[0]
+        return results
+
+
+    # def adjust_teacher_forcing(self, k=7000):
+    def adjust_teacher_forcing(self, k=500):
+        iteration = self.iter + 1
+
+        sampling_ratio = k / (k + np.exp(iteration / k))
+        # sampling_scale = 1 - np.exp(-self.iter/k)
+
+        if sampling_ratio < 1e-6:
+            sampling_ratio = 0
+
+        # if 1 - sampling_scale < 1e-6:
+        #     sampling_scale = 1
+
+        self.storage.put_scalars(
+            sampling_ratio=sampling_ratio,
+            # sampling_scale=sampling_scale,
+            smoothing_hint=False
+        )
+
+        teach_info = {
+            "sampling_ratio": sampling_ratio,
+            # "sampling_scale": sampling_scale,
+        }
+        return teach_info
+
+
+    def after_epoch(self):
+        return self.iter % self.anneal_iter == 0
+
+    def run_step(self):
+
+        start = time.perf_counter()
+        inputs, info = next(self.train_loader_iter)
+
+        for name in inputs:
+            inputs[name] = inputs[name].to(self.device, non_blocking=True)
+
+        data_time = time.perf_counter() - start
+
+        losses = {}
+        self.model.requires_grad_(True)
+
+        info.update(self.adjust_teacher_forcing())
+        if (self.iter + 1) % self.cfg.LOG_PERIOD == 0:
+            self.logger.info('sampling_ratio: {}'.format(info["sampling_ratio"]))
+            # self.logger.info('sampling_scale: {}'.format(info["sampling_scale"]))
+
+        with autocast(enabled=self.with_amp):
+            outputs = self.model(inputs, info=info)
+            losses.update(outputs["loss"])
+
+
+        loss = sum(losses.values())
+        self.optimizer.zero_grad()
+        self.grad_scaler.scale(loss).backward()
+        self.grad_scaler.step(self.optimizer)
+        self.grad_scaler.update()
+        # grad_norm = self.grad_scaler(loss, self.optimizer, parameters=self.model.parameters())
+        self.model.requires_grad_(False)
+
+        if self.with_ema:
+            self.model_ema.update(self.model, self.iter)
+
+        SimpleTrainer.write_metrics(losses, data_time)
+
+
 
 

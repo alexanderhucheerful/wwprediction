@@ -1,3 +1,4 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
 import importlib
 import numpy as np
 import os
@@ -69,15 +70,57 @@ def collect_env_info():
     data.append(("numpy", np.__version__))
 
     try:
-        import fanjiang  # noqa
+        import detectron2  # noqa
 
         data.append(
-            ("fanjiang", fanjiang.__version__ + " @" + os.path.dirname(fanjiang.__file__))
+            ("detectron2", detectron2.__version__ + " @" + os.path.dirname(detectron2.__file__))
         )
     except ImportError:
-        data.append(("fanjiang", "failed to import"))
+        data.append(("detectron2", "failed to import"))
     except AttributeError:
-        data.append(("fanjiang", "imported a wrong installation"))
+        data.append(("detectron2", "imported a wrong installation"))
+
+    try:
+        import detectron2._C as _C
+    except ImportError as e:
+        data.append(("detectron2._C", f"not built correctly: {e}"))
+
+        # print system compilers when extension fails to build
+        if sys.platform != "win32":  # don't know what to do for windows
+            try:
+                # this is how torch/utils/cpp_extensions.py choose compiler
+                cxx = os.environ.get("CXX", "c++")
+                cxx = subprocess.check_output("'{}' --version".format(cxx), shell=True)
+                cxx = cxx.decode("utf-8").strip().split("\n")[0]
+            except subprocess.SubprocessError:
+                cxx = "Not found"
+            data.append(("Compiler ($CXX)", cxx))
+
+            if has_cuda and CUDA_HOME is not None:
+                try:
+                    nvcc = os.path.join(CUDA_HOME, "bin", "nvcc")
+                    nvcc = subprocess.check_output("'{}' -V".format(nvcc), shell=True)
+                    nvcc = nvcc.decode("utf-8").strip().split("\n")[-1]
+                except subprocess.SubprocessError:
+                    nvcc = "Not found"
+                data.append(("CUDA compiler", nvcc))
+        if has_cuda and sys.platform != "win32":
+            try:
+                so_file = importlib.util.find_spec("detectron2._C").origin
+            except (ImportError, AttributeError):
+                pass
+            else:
+                data.append(
+                    ("detectron2 arch flags", detect_compute_compatibility(CUDA_HOME, so_file))
+                )
+    else:
+        # print compilers that are used to build extension
+        data.append(("Compiler", _C.get_compiler_version()))
+        data.append(("CUDA compiler", _C.get_cuda_version()))  # cuda or hip
+        if has_cuda and getattr(_C, "has_cuda", lambda: True)():
+            data.append(
+                ("detectron2 arch flags", detect_compute_compatibility(CUDA_HOME, _C.__file__))
+            )
 
     data.append(get_env_module())
     data.append(("PyTorch", torch_version + " @" + os.path.dirname(torch.__file__)))
@@ -153,7 +196,7 @@ def collect_env_info():
 
 if __name__ == "__main__":
     try:
-        from fanjiang.utils.collect_env import collect_env_info as f
+        from detectron2.utils.collect_env import collect_env_info as f
 
         print(f())
     except ImportError:

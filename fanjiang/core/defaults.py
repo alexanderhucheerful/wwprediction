@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) Facebook, Inc. and its affiliates.
+
 """
 This file contains components with some default boilerplate logic user may need
 in training / testing. They will not work for everyone, but many users may find them useful.
@@ -10,8 +13,8 @@ import argparse
 import os
 import sys
 from typing import Optional
+
 import torch
-import deepspeed
 from fanjiang.config import CfgNode, LazyConfig
 from fanjiang.utils import comm
 from fanjiang.utils.collect_env import collect_env_info
@@ -62,9 +65,7 @@ Run on multiple machines:
         help="Whether to attempt to resume from the checkpoint directory. "
         "See documentation of `DefaultTrainer.resume_or_load()` for what it means.",
     )
-    parser.add_argument("--use-ema", action="store_true", help="train with model ema")
     parser.add_argument("--eval-only", action="store_true", help="perform evaluation only")
-    parser.add_argument("--local_rank", type=int, default=0, help="the process number of each node")
     parser.add_argument("--num-gpus", type=int, default=1, help="number of gpus *per machine*")
     parser.add_argument("--num-machines", type=int, default=1, help="total number of machines")
     parser.add_argument(
@@ -91,10 +92,7 @@ For python-based LazyConfig, use "path.key=value".
         default=None,
         nargs=argparse.REMAINDER,
     )
-
-    parser = deepspeed.add_config_arguments(parser)
     return parser
-
 
 
 def _try_get_key(cfg, *keys, default=None):
@@ -118,7 +116,6 @@ def _try_get_key(cfg, *keys, default=None):
 
 
 def _highlight(code, filename):
-    return code
     try:
         import pygments
     except ImportError:
@@ -149,7 +146,7 @@ def default_setup(cfg, args):
         PathManager.mkdirs(output_dir)
 
     rank = comm.get_rank()
-    setup_logger(output_dir, distributed_rank=rank, name="pipeline")
+    setup_logger(output_dir, distributed_rank=rank, name="fvcore")
     logger = setup_logger(output_dir, distributed_rank=rank)
 
     logger.info("Rank of current process: {}. World size: {}".format(rank, comm.get_world_size()))
@@ -187,7 +184,8 @@ def default_setup(cfg, args):
             cfg, "CUDNN_BENCHMARK", "train.cudnn_benchmark", default=False
         )
 
-def default_writers(output_dir: str, max_iter: Optional[int] = None):
+
+def default_writers(cfg):
     """
     Build a list of :class:`EventWriter` to be used.
     It now consists of a :class:`CommonMetricPrinter`,
@@ -200,10 +198,9 @@ def default_writers(output_dir: str, max_iter: Optional[int] = None):
     Returns:
         list[EventWriter]: a list of :class:`EventWriter` objects.
     """
-    PathManager.mkdirs(output_dir)
     return [
         # It may not always print what you want to see, since it prints "common" metrics only.
-        CommonMetricPrinter(max_iter),
-        JSONWriter(os.path.join(output_dir, "metrics.json")),
-        TensorboardXWriter(output_dir),
+        CommonMetricPrinter(cfg.SOLVER.MAX_ITER),
+        JSONWriter(os.path.join(cfg.OUTPUT_DIR, "metrics.json")),
+        TensorboardXWriter(cfg.OUTPUT_DIR),
     ]

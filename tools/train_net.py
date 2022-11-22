@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding:utf-8 -*-
+
 from fanjiang.config import get_cfg
 from fanjiang.core import (AdversarialTrainer, default_argument_parser,
                            default_setup, launch)
@@ -26,7 +29,6 @@ def main(args):
         with EventStorage() as storage:
             return trainer.test()
 
-    trainer.register_hooks(trainer.build_hooks())
     return trainer.train()
 
 

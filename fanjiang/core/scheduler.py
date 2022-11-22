@@ -7,66 +7,19 @@ import torch
 
 # pyre-ignore-all-errors[58]   # handle optional
 
-__all__ = ["WarmupParamScheduler", "CosineParamScheduler", "LRMultiplier"]
 
-
-class CyclicScheduler(torch.optim.lr_scheduler._LRScheduler):
-    def __init__(
-        self,
-        optimizer,
-        base_lr,
-        anneal_decay=0.01,
-        anneal_iters=10,
-        anneal_strategy='cos',
-        last_epoch=-1
-    ):
-        base_lrs = self._format_param(optimizer, base_lr)
-
-        for base_lr, group in zip(base_lrs, optimizer.param_groups):
-            group['start_lr'] = base_lr
-            group['end_lr'] = base_lr * anneal_decay
-
-        if anneal_strategy not in ['cos', 'linear']:
-            raise ValueError("anneal_strategy must by one of 'cos' or 'linear', "
-                             "instead got {}".format(anneal_strategy))
-        elif anneal_strategy == 'cos':
-            self.anneal_func = self._cosine_anneal
-        elif anneal_strategy == 'linear':
-            self.anneal_func = self._linear_anneal
-        if not isinstance(anneal_iters, int) or anneal_iters < 0:
-            raise ValueError("anneal_iters must be equal or greater than 0, got {}".format(
-                             anneal_iters))
-        self.anneal_iters = anneal_iters
-        super(CyclicScheduler, self).__init__(optimizer, last_epoch)
-
-    @staticmethod
-    def _format_param(optimizer, lrs):
-        if isinstance(lrs, (list, tuple)):
-            if len(lrs) != len(optimizer.param_groups):
-                raise ValueError("lrs must have the same length as "
-                                 "optimizer.param_groups: lrs has {}, "
-                                 "optimizer.param_groups has {}".format(
-                                     len(lrs), len(optimizer.param_groups)))
-            return lrs
-        else:
-            return [lrs] * len(optimizer.param_groups)
-
-    @staticmethod
-    def _linear_anneal(t):
-        return t
-
-    @staticmethod
-    def _cosine_anneal(t):
-        return (1 - math.cos(math.pi * t)) / 2
-
-    def get_lr(self):
-        progress = self._step_count % self.anneal_iters
-
-        t = max(0, min(1, progress / max(1, self.anneal_iters)))
-        alpha = self.anneal_func(t)
-
-        return [group['end_lr'] * alpha + group["start_lr"] * (1 - alpha)
-                for group in self.optimizer.param_groups]
+__all__ = [
+    "ParamScheduler",
+    "ConstantParamScheduler",
+    "CosineParamScheduler",
+    "ExponentialParamScheduler",
+    "LinearParamScheduler",
+    "CompositeParamScheduler",
+    "MultiStepParamScheduler",
+    "StepParamScheduler",
+    "StepWithFixedGammaParamScheduler",
+    "PolynomialDecayParamScheduler",
+]  # ported from ClassyVision
 
 
 class ParamScheduler:

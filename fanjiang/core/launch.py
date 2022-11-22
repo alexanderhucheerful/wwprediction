@@ -49,25 +49,14 @@ def launch(
         args (tuple): arguments passed to main_func
     """
     world_size = num_machines * num_gpus_per_machine
-
-    if dist_url == "auto":
-        assert num_machines == 1, "dist_url=auto not supported in multi-machine jobs."
-        port = _find_free_port()
-        dist_url = f"tcp://127.0.0.1:{port}"
-
-    if args[0].deepspeed:
-        import deepspeed
-        deepspeed.init_distributed(
-            dist_backend="nccl",
-            init_method="env://",
-            timeout=timeout,
-        )
-        main_func(*args)
-
-    elif world_size > 1:
+    if world_size > 1:
         # https://github.com/pytorch/pytorch/pull/14391
         # TODO prctl in spawned processes
 
+        if dist_url == "auto":
+            assert num_machines == 1, "dist_url=auto not supported in multi-machine jobs."
+            port = _find_free_port()
+            dist_url = f"tcp://127.0.0.1:{port}"
         if num_machines > 1 and dist_url.startswith("file://"):
             logger = logging.getLogger(__name__)
             logger.warning(

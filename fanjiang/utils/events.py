@@ -1,3 +1,4 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
 import datetime
 import json
 import logging
@@ -320,7 +321,7 @@ class CommonMetricPrinter(EventWriter):
 
         # NOTE: max_mem is parsed by grep in "dev/parse_results.sh"
         self.logger.info(
-            "{eta}iter: {iter}  {losses}  {time}{data_time}lr: {lr}  {memory}".format(
+            " {eta}iter: {iter}  {losses}  {time}{data_time}lr: {lr}  {memory}".format(
                 eta=f"eta: {eta_string}  " if eta_string else "",
                 iter=iteration,
                 losses="  ".join(
@@ -337,14 +338,26 @@ class CommonMetricPrinter(EventWriter):
             )
         )
 
-        # NOTE: extra information you want to print
 
         try:
-            sampling_ratio = "sampling_ratio: {:.4g}".format(storage.history("sampling_ratio").latest())
+            sampling_ratio = "sampling_ratio: {:.4f}".format(storage.history("sampling_ratio").latest())
         except KeyError:
-            sampling_ratio = "0"
+            sampling_ratio = "N/A"
 
-        self.logger.info(sampling_ratio)
+        try:
+            sampling_scale = "sampling_scale: {:.4f}".format(storage.history("sampling_scale").latest())
+        except KeyError:
+            sampling_scale = "N/A"
+
+        self.logger.info(
+            "{sampling_ratio} {sampling_scale}".format(
+                sampling_ratio=sampling_ratio,
+                sampling_scale=sampling_scale,
+            )
+        )
+
+
+
 
 
 class EventStorage:

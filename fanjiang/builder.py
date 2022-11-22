@@ -20,7 +20,7 @@ def build(cfg, func):
 
 def build_model(cfg):
     cfg_ = cfg.copy()
-    name = cfg_.pop('name')    
+    name = cfg_.pop('name')
     model = MODELS.get(name)(**cfg_)
     return model
 
@@ -34,7 +34,7 @@ def build_criterion(cfg):
     return criterion
 
 def build_criterions(cfg):
-    return build(cfg, build_criterion)    
+    return build(cfg, build_criterion)
 
 def build_metric(cfg):
     cfg_ = cfg.copy()

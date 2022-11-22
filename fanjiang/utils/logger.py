@@ -1,3 +1,4 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
 import atexit
 import functools
 import logging
@@ -13,6 +14,7 @@ from fanjiang.utils.file_io import PathManager
 
 
 __all__ = ["setup_logger", "log_first_n", "log_every_n", "log_every_n_seconds"]
+
 
 class _ColorfulFormatter(logging.Formatter):
     def __init__(self, *args, **kwargs):
@@ -39,7 +41,7 @@ def setup_logger(
     output=None, distributed_rank=0, *, color=True, name="fanjiang", abbrev_name=None
 ):
     """
-    Initialize the fanjiang logger and set its verbosity level to "DEBUG".
+    Initialize the detectron2 logger and set its verbosity level to "DEBUG".
 
     Args:
         output (str): a file name or a directory to save log. If None, will not save log file.
@@ -48,7 +50,7 @@ def setup_logger(
         name (str): the root module name of this logger
         abbrev_name (str): an abbreviation of the module, to avoid long names in logs.
             Set to "" to not log the root module in logs.
-            By default, will abbreviate "fanjiang" to "d2" and leave other
+            By default, will abbreviate "detectron2" to "d2" and leave other
             modules unchanged.
 
     Returns:
@@ -127,7 +129,7 @@ def _find_caller():
         if os.path.join("utils", "logger.") not in code.co_filename:
             mod_name = frame.f_globals["__name__"]
             if mod_name == "__main__":
-                mod_name = "fanjiang"
+                mod_name = "detectron2"
             return mod_name, (code.co_filename, frame.f_lineno, code.co_name)
         frame = frame.f_back
 
@@ -230,7 +232,7 @@ def create_small_table(small_dict):
 
 def _log_api_usage(identifier: str):
     """
-    Internal function used to log the usage of different fanjiang components
+    Internal function used to log the usage of different detectron2 components
     inside facebook's infra.
     """
-    torch._C._log_api_usage_once("fanjiang." + identifier)
+    torch._C._log_api_usage_once("detectron2." + identifier)

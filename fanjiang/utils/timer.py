@@ -1,35 +1,8 @@
+# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
+# -*- coding: utf-8 -*-
+
 from time import perf_counter
 from typing import Optional
-
-import datetime as dt
-
-def add_time(t, hours=0, minutes=0):
-    if len(t) == 8:
-        fmt="%Y%m%d"
-    elif len(t) == 10:
-        fmt="%Y%m%d%H"
-    elif len(t) == 12:
-        fmt="%Y%m%d%H%M"
-
-    t = dt.datetime.strptime(t, fmt)
-    t = t + dt.timedelta(hours=hours, minutes=minutes)
-    t = t.strftime("%Y%m%d%H%M")
-    return t
-
-def delta_time(t1, t2):
-    if len(t1) == 10:
-        fmt="%Y%m%d%H"
-    elif len(t1) == 12:
-        fmt="%Y%m%d%H%M"
-
-    t1 = dt.datetime.strptime(t1, fmt)
-    t2 = dt.datetime.strptime(t2, fmt)
-    diff = t2 - t1
-    if len(t1) == 10:
-        diff = int(diff.total_seconds() / 3600)
-    elif len(t1) == 12:
-        diff = int(diff.total_seconds() / 60)
-    return diff    
 
 
 class Timer:
