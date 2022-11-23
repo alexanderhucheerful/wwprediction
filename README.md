@@ -10,6 +10,9 @@ The data-driven approaches for medium-range weather forecasting are recently sho
 
 ## Usage
 
+**Install:**
+python setup.py build develop
+
 **Train SwinVRNN:**
 ```
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
