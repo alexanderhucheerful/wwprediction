@@ -11,7 +11,9 @@ The data-driven approaches for medium-range weather forecasting are recently sho
 ## Usage
 
 **Install:**
+```
 python setup.py build develop
+```
 
 **Train SwinVRNN:**
 ```
